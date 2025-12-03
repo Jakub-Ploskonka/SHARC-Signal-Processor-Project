@@ -1,3 +1,5 @@
+# MacOS śmieci:
 .DS_Store
 
-.metadata
+# Eclipse / CCS / CrossCore metadata
+.metadata/
