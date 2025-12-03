@@ -15,7 +15,9 @@
 
 #include "ADDS_21479_EzKit.h"
 #include <fract.h>
-#include "fir_stereo.h"
+
+
+#define TAPS	48
 
 /*
  * np. 	float: -0.00187140162770069
@@ -96,57 +98,68 @@ int *txB_block_pointer[2] = {TxBlock_B0, TxBlock_B1};
 
 void handleCodecData(unsigned int blockIndex)
 {
+    /* Clear the Block Ready Semaphore */
     inputReady = 0;
+
+    /* Set the Processing Active Semaphore before starting processing */
     isProcessing = 1;
 
+    /* Interpretujemy bufory Rx/Tx jako fract32 (1.31) */
     fract32 *rx  = (fract32*)rxA_block_pointer[blockIndex];
     fract32 *txA = (fract32*)txA_block_pointer[blockIndex];
     fract32 *txB = (fract32*)txB_block_pointer[blockIndex];
 
-    // Bufory tymczasowe na jeden blok dla L2 i R2 (wejścia filtra)
-    static fract32 inL2[NUM_SAMPLES];
-    static fract32 inR2[NUM_SAMPLES];
+    // Wejścia do filtra:
+        // L2 = slot 2, R2 = slot 3
+        fract32 inL2[NUM_SAMPLES];
+        fract32 inR2[NUM_SAMPLES];
 
-    // Bufory wynikowe dla L3 i R3 (wyjścia filtra)
-    static fract32 outL3[NUM_SAMPLES];
-    static fract32 outR3[NUM_SAMPLES];
+        // Wyjścia filtra (L3,R3) – zapiszemy w txB
+        fract32 outL3[NUM_SAMPLES];
+        fract32 outR3[NUM_SAMPLES];
 
-    //Rozpleć wejście: z DMA do prostych tablic kanałowych
-    for (int n = 0; n < NUM_SAMPLES; n++)
-    {
-        inL2[n] = rx[n * NUM_RX_SLOTS + 2]; // AIN2 L (slot 2)
-        inR2[n] = rx[n * NUM_RX_SLOTS + 3]; // AIN2 R (slot 3)
-    }
+    /*
+     * Układ slotów (jak w oryginalnym demie):
+     *  dla każdej próbki n:
+     *    rx[n * NUM_RX_SLOTS + 0] = AIN1 L
+     *    rx[n * NUM_RX_SLOTS + 1] = AIN1 R
+     *    rx[n * NUM_RX_SLOTS + 2] = AIN2 L
+     *    rx[n * NUM_RX_SLOTS + 3] = AIN2 R
+     *
+     * My filtrujemy:
+     *    AIN2 L  (slot 2) → AOUT1 L (slot 0)
+     *    AIN2 R  (slot 3) → AOUT1 R (slot 1) [czysty przelot]
+     */
 
-    //FIR lewego kanału: L2 → L3
-    for (int n = 0; n < NUM_SAMPLES; n++)
-    {
-        outL3[n] = filterFIR_L(stateL, fcoeffs, inL2[n]);
-    }
+        //Rozplecenie wejść blokowych na dwa kanały
+            for (int n = 0; n < NUM_SAMPLES; n++)
+            {
+                inL2[n] = rx[n * NUM_RX_SLOTS + 2]; // AIN2 L
+                inR2[n] = rx[n * NUM_RX_SLOTS + 3]; // AIN2 R
+            }
 
-    //FIR prawego kanału: R2 → R3
-    for (int n = 0; n < NUM_SAMPLES; n++)
-    {
-        outR3[n] = filterFIR_R(stateR, fcoeffs, inR2[n]);
-    }
+            //FIR lewego kanału: L2 → L3
+            fir_block_fract(stateL, fcoeffs, inL2, outL3, NUM_SAMPLES);
 
-    //Zapis wyników na wyjścia + ewentualny talkthrough
-    for (int n = 0; n < NUM_SAMPLES; n++)
-    {
-        // AOUT3 L,R (sloty 0,1 w txB) = przefiltrowane L3,R3
-        txB[n * NUM_TX_SLOTS + 0] = outL3[n];
-        txB[n * NUM_TX_SLOTS + 1] = outR3[n];
+            //FIR prawego kanału: R2 → R3
+            fir_block_fract(stateR, fcoeffs, inR2, outR3, NUM_SAMPLES);
 
-        // Dla przykładu: AOUT1 L,R = czysty przelot z AIN1 L,R
-        txA[n * NUM_TX_SLOTS + 0] = rx[n * NUM_RX_SLOTS + 0]; // L1
-        txA[n * NUM_TX_SLOTS + 1] = rx[n * NUM_RX_SLOTS + 1]; // R1
+            //Zapis wyników na wyjścia DAC3 (L3,R3) = txB slots 0,1
+            for (int n = 0; n < NUM_SAMPLES; n++)
+            {
+                // AOUT3 L, R
+                txB[n * NUM_TX_SLOTS + 0] = outL3[n]; // L3
+                txB[n * NUM_TX_SLOTS + 1] = outR3[n]; // R3
 
-        // Pozostałe wyjścia wyzerowane (lub wg uznania)
-        txA[n * NUM_TX_SLOTS + 2] = 0;
-        txA[n * NUM_TX_SLOTS + 3] = 0;
-        txB[n * NUM_TX_SLOTS + 2] = 0;
-        txB[n * NUM_TX_SLOTS + 3] = 0;
-    }
+                // Reszta wyjść – np. czysty przelot AIN1 -> AOUT1 (opcjonalnie)
+                txA[n * NUM_TX_SLOTS + 0] = rx[n * NUM_RX_SLOTS + 0]; // L1
+                txA[n * NUM_TX_SLOTS + 1] = rx[n * NUM_RX_SLOTS + 1]; // R1
+                txA[n * NUM_TX_SLOTS + 2] = 0;                        // L2 out nieużyte
+                txA[n * NUM_TX_SLOTS + 3] = 0;                        // R2 out nieużyte
 
-    isProcessing = 0;
+                txB[n * NUM_TX_SLOTS + 2] = 0; // L4
+                txB[n * NUM_TX_SLOTS + 3] = 0; // R4
+            }
+
+            isProcessing = 0;
 }

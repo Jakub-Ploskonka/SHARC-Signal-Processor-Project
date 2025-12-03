@@ -15,7 +15,9 @@
 
 #include "ADDS_21479_EzKit.h"
 #include <fract.h>
-#include "fir_stereo.h"
+
+
+#define TAPS	48
 
 /*
  * np. 	float: -0.00187140162770069
@@ -32,13 +34,10 @@ fract32 pm fcoeffs[TAPS] =
     -62194175, -27614702, 7522111, 32055785, 40651519, 34079285, 17582935, -1786709,
     -17798196, -26786173, -28142781, -23685927, -16394870, -9128036, -4018804, 304183
 };
+fract32 dm state[TAPS + 1]; //+2byczq
 
-/* osobny stan dla lewego i prawego kanału */
-fract32 dm stateL[TAPS + 1];
-fract32 dm stateR[TAPS + 1];
+extern fract32 filterFIR(fract32 *state, const fract32 *coeff, fract32 sample);
 
-extern fract32 filterFIR_L(fract32 *dummy_state, const fract32 *coeff, fract32 sample);
-extern fract32 filterFIR_R(fract32 *dummy_state, const fract32 *coeff, fract32 sample);
 // ----------------------------------------------------------
 //   FIR BLOCK VERSION – pętla C wołająca ASM dla 1 próbki
 // ----------------------------------------------------------
@@ -49,6 +48,7 @@ void fir_block_fract(fract32 *state, const fract32 *coeff, const fract32 *x, fra
         y[n] = filterFIR(state, coeff, x[n]);
     }
 }
+
 
 /* Define a structure to represent buffers for all 12 floating-point
  * data channels of the AD1939 */
@@ -96,57 +96,56 @@ int *txB_block_pointer[2] = {TxBlock_B0, TxBlock_B1};
 
 void handleCodecData(unsigned int blockIndex)
 {
+    /* Clear the Block Ready Semaphore */
     inputReady = 0;
+
+    /* Set the Processing Active Semaphore before starting processing */
     isProcessing = 1;
 
+    /* Interpretujemy bufory Rx/Tx jako fract32 (1.31) */
     fract32 *rx  = (fract32*)rxA_block_pointer[blockIndex];
     fract32 *txA = (fract32*)txA_block_pointer[blockIndex];
     fract32 *txB = (fract32*)txB_block_pointer[blockIndex];
 
-    // Bufory tymczasowe na jeden blok dla L2 i R2 (wejścia filtra)
-    static fract32 inL2[NUM_SAMPLES];
-    static fract32 inR2[NUM_SAMPLES];
+    /*
+     * Układ slotów (jak w oryginalnym demie):
+     *  dla każdej próbki n:
+     *    rx[n * NUM_RX_SLOTS + 0] = AIN1 L
+     *    rx[n * NUM_RX_SLOTS + 1] = AIN1 R
+     *    rx[n * NUM_RX_SLOTS + 2] = AIN2 L
+     *    rx[n * NUM_RX_SLOTS + 3] = AIN2 R
+     *
+     * My filtrujemy:
+     *    AIN2 L  (slot 2) → AOUT1 L (slot 0)
+     *    AIN2 R  (slot 3) → AOUT1 R (slot 1) [czysty przelot]
+     */
 
-    // Bufory wynikowe dla L3 i R3 (wyjścia filtra)
-    static fract32 outL3[NUM_SAMPLES];
-    static fract32 outR3[NUM_SAMPLES];
-
-    //Rozpleć wejście: z DMA do prostych tablic kanałowych
     for (int n = 0; n < NUM_SAMPLES; n++)
     {
-        inL2[n] = rx[n * NUM_RX_SLOTS + 2]; // AIN2 L (slot 2)
-        inR2[n] = rx[n * NUM_RX_SLOTS + 3]; // AIN2 R (slot 3)
+        /* Wejście do filtra: lewy kanał z wejścia 2 (AIN2 L, slot 2) */
+        fract32 inL2  = rx[n * NUM_RX_SLOTS + 2];
+
+        /* Jedna próbka filtra FIR w asemblerze */
+        fract32 outL1 = filterFIR(state, fcoeffs, inL2);
+
+        /* Wyjście filtra → AOUT1 L (slot 0) */
+        txA[n * NUM_TX_SLOTS + 0] = outL1;
+
+        /* Prawy kanał: AIN2 R (slot 3) → AOUT1 R (slot 1) – czysty talkthrough */
+        txA[n * NUM_TX_SLOTS + 1] = rx[n * NUM_RX_SLOTS + 3];
+
+        /* Opcjonalnie: pozostałe wyjścia można wyzerować lub coś tam wstawić.
+         * Tutaj zerujemy, żeby nie wysyłać śmieci:
+         */
+        txA[n * NUM_TX_SLOTS + 2] = 0;  /* AOUT2 L */
+        txA[n * NUM_TX_SLOTS + 3] = 0;  /* AOUT2 R */
+
+        txB[n * NUM_TX_SLOTS + 0] = 0;  /* AOUT3 L */
+        txB[n * NUM_TX_SLOTS + 1] = 0;  /* AOUT3 R */
+        txB[n * NUM_TX_SLOTS + 2] = 0;  /* AOUT4 L */
+        txB[n * NUM_TX_SLOTS + 3] = 0;  /* AOUT4 R */
     }
 
-    //FIR lewego kanału: L2 → L3
-    for (int n = 0; n < NUM_SAMPLES; n++)
-    {
-        outL3[n] = filterFIR_L(stateL, fcoeffs, inL2[n]);
-    }
-
-    //FIR prawego kanału: R2 → R3
-    for (int n = 0; n < NUM_SAMPLES; n++)
-    {
-        outR3[n] = filterFIR_R(stateR, fcoeffs, inR2[n]);
-    }
-
-    //Zapis wyników na wyjścia + ewentualny talkthrough
-    for (int n = 0; n < NUM_SAMPLES; n++)
-    {
-        // AOUT3 L,R (sloty 0,1 w txB) = przefiltrowane L3,R3
-        txB[n * NUM_TX_SLOTS + 0] = outL3[n];
-        txB[n * NUM_TX_SLOTS + 1] = outR3[n];
-
-        // Dla przykładu: AOUT1 L,R = czysty przelot z AIN1 L,R
-        txA[n * NUM_TX_SLOTS + 0] = rx[n * NUM_RX_SLOTS + 0]; // L1
-        txA[n * NUM_TX_SLOTS + 1] = rx[n * NUM_RX_SLOTS + 1]; // R1
-
-        // Pozostałe wyjścia wyzerowane (lub wg uznania)
-        txA[n * NUM_TX_SLOTS + 2] = 0;
-        txA[n * NUM_TX_SLOTS + 3] = 0;
-        txB[n * NUM_TX_SLOTS + 2] = 0;
-        txB[n * NUM_TX_SLOTS + 3] = 0;
-    }
-
+    /* Clear the Processing Active Semaphore after processing is complete */
     isProcessing = 0;
 }
