@@ -6,7 +6,7 @@
  to the terms of the associated Analog Devices License Agreement.
 
  *********************************************************************************/
-// File name: SPORT1_ISR_process_samples_.asm
+
 /******************************************************************************************************
 /                                                                                                     /
 /                            AD1939 - SPORT1 RX INTERRUPT SERVICE ROUTINE                             /
@@ -73,13 +73,13 @@ _filterFIR :
 	BIT SET Mode1 0x1000000;  //circular buffer mode ON 
 	nop; 
 	i4= dm ( spint );   
-	// Load ï¿½stateï¿½ buffer current pointer 
+	// Load “state” buffer current pointer 
 	//r4=i4;   
 	r8=i4;
 	//dm (i4,1)=r12;   
 	dm (i4,-1)=r12;   
 	
-	// save new sample in circular buffer ï¿½stateï¿½ 
+	// save new sample in circular buffer “state” 
 	dm ( spint )=i4; 
 	i4=r4; m4=TAPS;
 	r0= dm (i4,0);

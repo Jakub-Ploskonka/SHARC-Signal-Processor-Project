@@ -36,7 +36,7 @@ fract32 pm fcoeffs[TAPS] =
 };
 fract32 dm state[TAPS + 1]; //+2byczq
 
-extern fract32 filterFIR(fract32 *state, const fract32 *coeff, fract32 sample);
+extern fract32 filterFIR_fract_1sample(fract32 *state, const fract32 *coeff, fract32 sample);
 
 // ----------------------------------------------------------
 //   FIR BLOCK VERSION – pętla C wołająca ASM dla 1 próbki
@@ -45,7 +45,7 @@ void fir_block_fract(fract32 *state, const fract32 *coeff, const fract32 *x, fra
 {
     for (int n = 0; n < N; n++)
     {
-        y[n] = filterFIR(state, coeff, x[n]);
+        y[n] = filterFIR_fract_1sample(state, coeff, x[n]);
     }
 }
 
@@ -126,7 +126,7 @@ void handleCodecData(unsigned int blockIndex)
         fract32 inL2  = rx[n * NUM_RX_SLOTS + 2];
 
         /* Jedna próbka filtra FIR w asemblerze */
-        fract32 outL1 = filterFIR(state, fcoeffs, inL2);
+        fract32 outL1 = filterFIR_fract_1sample(state, fcoeffs, inL2);
 
         /* Wyjście filtra → AOUT1 L (slot 0) */
         txA[n * NUM_TX_SLOTS + 0] = outL1;
